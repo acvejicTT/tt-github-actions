@@ -5,6 +5,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Ensure required tools are installed
+
+# Add error handling
+set -e
+set -o pipefail
+
+
 for tool in gh jq; do
     if ! command -v $tool &> /dev/null; then
         echo "$tool could not be found. Please install it to proceed."
@@ -57,8 +63,36 @@ download_logs_for_all_jobs() {
 set_up_dirs "$RUN_ID"
 download_artifacts "$REPOSITORY" "$RUN_ID"
 # Note: we don't need information from logs yet
-# download_logs_for_all_jobs "$REPOSITORY" "$RUN_ID" "$ATTEMPT_NUMBER"
-gh api /repos/$REPOSITORY/actions/runs/$RUN_ID/attempts/$ATTEMPT_NUMBER > generated/cicd/$RUN_ID/workflow.json
-gh api /repos/$REPOSITORY/actions/runs/$RUN_ID/attempts/$ATTEMPT_NUMBER/jobs --paginate  | jq -s '{total_count: .[0].total_count, jobs: map(.jobs) | add}' > generated/cicd/$RUN_ID/workflow_jobs.json
+echo "[Info] Downloading workflow data for run $RUN_ID, attempt $ATTEMPT_NUMBER from repository $REPOSITORY"
+WORKFLOW_API_RESPONSE=$(gh api /repos/$REPOSITORY/actions/runs/$RUN_ID/attempts/$ATTEMPT_NUMBER)
+echo "[Debug] Workflow API response length: $(echo "$WORKFLOW_API_RESPONSE" | wc -c)"
+echo "[Debug] First 200 chars of workflow response: $(echo "$WORKFLOW_API_RESPONSE" | head -c 200)"
+
+# Check if the response contains an "id" field
+if echo "$WORKFLOW_API_RESPONSE" | jq -e '.id' > /dev/null 2>&1; then
+    echo "[Info] Successfully retrieved workflow data with ID: $(echo "$WORKFLOW_API_RESPONSE" | jq -r '.id')"
+    echo "$WORKFLOW_API_RESPONSE" > generated/cicd/$RUN_ID/workflow.json
+else
+    echo "[Error] Workflow API response does not contain expected 'id' field"
+    echo "[Error] Full response: $WORKFLOW_API_RESPONSE"
+    exit 1
+fi
+
+# Add debugging and error checking for jobs API call
+echo "[Info] Downloading workflow jobs data"
+JOBS_API_RESPONSE=$(gh api /repos/$REPOSITORY/actions/runs/$RUN_ID/attempts/$ATTEMPT_NUMBER/jobs --paginate)
+echo "[Debug] Jobs API response length: $(echo "$JOBS_API_RESPONSE" | wc -c)"
+
+# Process jobs response and check structure
+PROCESSED_JOBS=$(echo "$JOBS_API_RESPONSE" | jq -s '{total_count: .[0].total_count, jobs: map(.jobs) | add}')
+if echo "$PROCESSED_JOBS" | jq -e '.jobs' > /dev/null 2>&1; then
+    echo "[Info] Successfully retrieved jobs data with $(echo "$PROCESSED_JOBS" | jq -r '.total_count // 0') jobs"
+    echo "$PROCESSED_JOBS" > generated/cicd/$RUN_ID/workflow_jobs.json
+else
+    echo "[Error] Jobs API response does not contain expected structure"
+    echo "[Error] Raw jobs response: $JOBS_API_RESPONSE"
+    echo "[Error] Processed jobs: $PROCESSED_JOBS"
+    exit 1
+fi
 
 find generated/cicd/$RUN_ID -type f -exec ls -lh {} \;
