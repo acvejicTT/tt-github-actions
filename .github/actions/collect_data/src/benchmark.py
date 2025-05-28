@@ -136,6 +136,7 @@ class ShieldBenchmarkDataMapper(_BenchmarkDataMapper):
     def map_benchmark_data(self, pipeline, job_id, report_data) -> CompleteBenchmarkRun | None:
         """
         Maps benchmark and evaluation data from the report to CompleteBenchmarkRun objects.
+        Supports both old and new format reports.
         """
         job = self._get_job(pipeline, job_id)
         if job is None:
@@ -159,58 +160,167 @@ class ShieldBenchmarkDataMapper(_BenchmarkDataMapper):
             logger.error(f"No job found with github_job_id: {job_id}")
         return job
 
+    def _is_new_format_benchmark(self, benchmark):
+        """
+        Determines if the benchmark data is in the new format.
+        New format has 'isl', 'osl' fields instead of 'input_sequence_length', 'output_sequence_length'.
+        """
+        return 'isl' in benchmark and 'osl' in benchmark
+
     def _process_benchmarks(self, pipeline, job, benchmarks):
         """
         Processes benchmark entries and creates CompleteBenchmarkRun objects for each entry.
+        Handles both old and new format benchmarks.
         """
         results = []
         for benchmark in benchmarks:
-            measurements = self._create_measurements(
-                job,
-                "benchmark",
-                benchmark,
-                [
-                    "mean_ttft_ms",
-                    "std_ttft_ms",
-                    "mean_tpot_ms",
-                    "std_tpot_ms",
-                    "mean_tps",
-                    "std_tps",
-                    "tps_decode_throughput",
-                    "tps_prefill_throughput",
-                    "mean_e2el_ms",
-                    "request_throughput",
-                ],
-            )
-            model_name = benchmark.get("model_id")
-            if model_name and "/" in model_name:
-                model_name = model_name.split("/", 1)[1]
-            results.append(
-                self._create_complete_benchmark_run(
+            if self._is_new_format_benchmark(benchmark):
+                # Process new format benchmark
+                results.extend(self._process_new_format_benchmark(pipeline, job, benchmark))
+            else:
+                # Process old format benchmark
+                results.append(self._process_old_format_benchmark(pipeline, job, benchmark))
+        return results
+
+    def _process_old_format_benchmark(self, pipeline, job, benchmark):
+        """
+        Processes old format benchmark data.
+        """
+        measurements = self._create_measurements(
+            job,
+            "benchmark",
+            benchmark,
+            [
+                "mean_ttft_ms",
+                "std_ttft_ms",
+                "mean_tpot_ms",
+                "std_tpot_ms",
+                "mean_tps",
+                "std_tps",
+                "tps_decode_throughput",
+                "tps_prefill_throughput",
+                "mean_e2el_ms",
+                "request_throughput",
+            ],
+        )
+        model_name = benchmark.get("model_id")
+        if model_name and "/" in model_name:
+            model_name = model_name.split("/", 1)[1]
+        
+        return self._create_complete_benchmark_run(
+            pipeline=pipeline,
+            job=job,
+            data=benchmark,
+            run_type="benchmark",
+            measurements=measurements,
+            device_info=benchmark.get("device"),
+            model_name=model_name,
+            input_seq_length=benchmark.get("input_sequence_length"),
+            output_seq_length=benchmark.get("output_sequence_length"),
+            dataset_name=benchmark.get("model_id", None),
+            batch_size=benchmark.get("max_con"),
+        )
+
+    def _process_new_format_benchmark(self, pipeline, job, benchmark):
+        """
+        Processes new format benchmark data.
+        Creates multiple benchmark runs for different target check levels.
+        """
+        results = []
+        
+        # Create measurements for the main benchmark metrics
+        main_measurements = self._create_measurements(
+            job,
+            "benchmark",
+            benchmark,
+            ["ttft", "tput_user", "tput"],
+        )
+        
+        # Map new format fields to old format equivalents for compatibility
+        mapped_benchmark = {
+            "input_sequence_length": benchmark.get("isl"),
+            "output_sequence_length": benchmark.get("osl"),
+            "max_con": benchmark.get("max_concurrency"),
+            "mean_ttft_ms": benchmark.get("ttft"),
+            "tput_user": benchmark.get("tput_user"),
+            "tput": benchmark.get("tput"),
+        }
+        
+        # Create main benchmark run
+        main_run = self._create_complete_benchmark_run(
+            pipeline=pipeline,
+            job=job,
+            data=mapped_benchmark,
+            run_type="benchmark",
+            measurements=main_measurements,
+            device_info="t3k",  # Default for new format
+            model_name="Llama-3.2-1B-Instruct",  # Default for new format
+            input_seq_length=benchmark.get("isl"),
+            output_seq_length=benchmark.get("osl"),
+            dataset_name=None,
+            batch_size=benchmark.get("max_concurrency"),
+        )
+        results.append(main_run)
+        
+        # Process target checks if present
+        target_checks = benchmark.get("target_checks", {})
+        for check_type, check_data in target_checks.items():
+            if isinstance(check_data, dict):
+                # Create measurements for target check metrics
+                target_measurements = self._create_measurements(
+                    job,
+                    f"target_check_{check_type}",
+                    check_data,
+                    ["ttft", "ttft_ratio", "ttft_check", "tput_user", "tput_user_ratio", "tput_user_check", "tput_check"],
+                )
+                
+                # Create mapped data for target check
+                mapped_target_data = {
+                    "input_sequence_length": benchmark.get("isl"),
+                    "output_sequence_length": benchmark.get("osl"),
+                    "max_con": benchmark.get("max_concurrency"),
+                    "target_type": check_type,
+                    **check_data
+                }
+                
+                target_run = self._create_complete_benchmark_run(
                     pipeline=pipeline,
                     job=job,
-                    data=benchmark,
-                    run_type="benchmark",
-                    measurements=measurements,
-                    device_info=benchmark.get("device"),
-                    model_name=model_name,
-                    input_seq_length=benchmark.get("input_sequence_length"),
-                    output_seq_length=benchmark.get("output_sequence_length"),
-                    dataset_name=benchmark.get("model_id", None),
-                    batch_size=benchmark.get("max_con"),
+                    data=mapped_target_data,
+                    run_type=f"target_check_{check_type}",
+                    measurements=target_measurements,
+                    device_info="t3k",
+                    model_name="Llama-3.2-1B-Instruct",
+                    input_seq_length=benchmark.get("isl"),
+                    output_seq_length=benchmark.get("osl"),
+                    dataset_name=None,
+                    batch_size=benchmark.get("max_concurrency"),
                 )
-            )
+                results.append(target_run)
+                
         return results
 
     def _process_evals(self, pipeline, job, evals):
         """
         Processes evaluation entries and creates CompleteBenchmarkRun objects for each entry.
+        Handles both old and new format evaluations.
         """
         results = []
         for eval_entry in evals:
-            measurements = self._create_measurements(
-                job, "eval", eval_entry, ["score", "published_score", "gpu_reference_score"]
-            )
+            # Check if it's new format (simplified) or old format
+            if "accuracy_check" in eval_entry and isinstance(eval_entry.get("accuracy_check"), int):
+                # New format evaluation
+                measurements = self._create_measurements(
+                    job, "eval", eval_entry, 
+                    ["accuracy_check", "score", "ratio_to_reference", "ratio_to_published"]
+                )
+            else:
+                # Old format evaluation
+                measurements = self._create_measurements(
+                    job, "eval", eval_entry, 
+                    ["score", "published_score", "gpu_reference_score"]
+                )
+            
             results.append(
                 self._create_complete_benchmark_run(
                     pipeline=pipeline,
@@ -222,7 +332,7 @@ class ShieldBenchmarkDataMapper(_BenchmarkDataMapper):
                     model_name=eval_entry.get("model"),
                     input_seq_length=None,
                     output_seq_length=None,
-                    dataset_name=eval_entry.get("metadata", {}).get("dataset_path"),
+                    dataset_name=eval_entry.get("metadata", {}).get("dataset_path") if "metadata" in eval_entry else eval_entry.get("task_name"),
                     batch_size=None,
                 )
             )
