@@ -53,7 +53,6 @@ def get_pipeline_row_from_github_info(
     github_pipeline_json: Dict[str, Any],
     github_jobs_json: Dict[str, Any],
 ) -> Dict[str, Any]:
-    
     github_pipeline_id = github_pipeline_json["id"]
     pipeline_submission_ts = github_pipeline_json["created_at"]
 
