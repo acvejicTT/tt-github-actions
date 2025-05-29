@@ -53,11 +53,6 @@ def get_pipeline_row_from_github_info(
     github_pipeline_json: Dict[str, Any],
     github_jobs_json: Dict[str, Any],
 ) -> Dict[str, Any]:
-    # Add debugging for unexpected JSON structure
-    if "id" not in github_pipeline_json:
-        logger.error(f"GitHub pipeline JSON missing 'id' field. Available keys: {list(github_pipeline_json.keys())}")
-        logger.error(f"GitHub pipeline JSON content: {github_pipeline_json}")
-        raise KeyError("Missing 'id' field in GitHub pipeline JSON")
     
     github_pipeline_id = github_pipeline_json["id"]
     pipeline_submission_ts = github_pipeline_json["created_at"]
